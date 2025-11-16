@@ -3,6 +3,7 @@ module github.com/ynishikata/lagTest
 go 1.23.4
 
 require (
+	github.com/mattn/go-sqlite3 v1.14.32 // indirect
 	github.com/openai/openai-go v1.12.0 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

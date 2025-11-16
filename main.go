@@ -3,15 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"sort"
 	"strconv"
 	"sync"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // simple in-memory vector store
@@ -79,6 +84,156 @@ func normalize(v []float32) {
 	for i, x := range v {
 		v[i] = x / norm
 	}
+}
+
+// --- SQLite helpers ---
+
+func floatsToBytes(v []float32) []byte {
+	b := make([]byte, 4*len(v))
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(b[i*4:], math.Float32bits(f))
+	}
+	return b
+}
+
+func bytesToFloats(b []byte) []float32 {
+	if len(b)%4 != 0 {
+		return nil
+	}
+	n := len(b) / 4
+	v := make([]float32, n)
+	for i := 0; i < n; i++ {
+		u := binary.LittleEndian.Uint32(b[i*4:])
+		v[i] = math.Float32frombits(u)
+	}
+	return v
+}
+
+func initSQLite(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		return nil, err
+	}
+	// conservative pragmas; keep it simple
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL;`); err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA synchronous=NORMAL;`); err != nil {
+		return nil, err
+	}
+	schema := `
+CREATE TABLE IF NOT EXISTS documents (
+	id INTEGER PRIMARY KEY,
+	content TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chunks (
+	id INTEGER PRIMARY KEY,
+	doc_id INTEGER NOT NULL,
+	text TEXT NOT NULL,
+	embedding BLOB NOT NULL,
+	FOREIGN KEY(doc_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+`
+	if _, err := db.Exec(schema); err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+func loadFromSQLite(db *sql.DB, store *ragStore) error {
+	rows, err := db.Query(`SELECT id, content FROM documents ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var docs []document
+	var maxID int
+	for rows.Next() {
+		var id int
+		var content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return err
+		}
+		docs = append(docs, document{
+			ID:      id,
+			Content: content,
+			// Chunks will be filled from chunks table as needed if required
+		})
+		if id > maxID {
+			maxID = id
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	cRows, err := db.Query(`SELECT doc_id, text, embedding FROM chunks ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer cRows.Close()
+
+	var chunks []storedChunk
+	for cRows.Next() {
+		var docID int
+		var text string
+		var emb []byte
+		if err := cRows.Scan(&docID, &text, &emb); err != nil {
+			return err
+		}
+		vec := bytesToFloats(emb)
+		if vec == nil {
+			continue
+		}
+		chunks = append(chunks, storedChunk{
+			DocID:  docID,
+			Text:   text,
+			Vector: vec,
+		})
+	}
+	if err := cRows.Err(); err != nil {
+		return err
+	}
+
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	store.docs = docs
+	store.chunks = chunks
+	store.nextDoc = maxID + 1
+	return nil
+}
+
+func saveDocumentSQLite(db *sql.DB, docID int, content string, chunks []string, vectors [][]float32) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if _, err = tx.Exec(`INSERT INTO documents (id, content) VALUES (?, ?)`, docID, content); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`INSERT INTO chunks (doc_id, text, embedding) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for i, ch := range chunks {
+		if _, err = stmt.Exec(docID, ch, floatsToBytes(vectors[i])); err != nil {
+			return err
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // API request/response types
@@ -222,6 +377,22 @@ func main() {
 
 	store := newRagStore()
 
+	// Optional SQLite persistence (rag.db in current directory)
+	var db *sql.DB
+	sqlitePath := os.Getenv("RAG_SQLITE_PATH")
+	if sqlitePath == "" {
+		sqlitePath = "rag.db"
+	}
+	db, err := initSQLite(sqlitePath)
+	if err != nil {
+		log.Fatalf("failed to init sqlite: %v", err)
+	}
+	defer db.Close()
+
+	if err := loadFromSQLite(db, store); err != nil {
+		log.Printf("failed to load from sqlite (continuing with empty store): %v", err)
+	}
+
 	mux := http.NewServeMux()
 
 	// Simple web UI
@@ -276,7 +447,7 @@ func main() {
 			vectors = append(vectors, vec)
 		}
 
-		// store
+		// store in memory
 		store.mu.Lock()
 		docID := store.nextDoc
 		store.nextDoc++
@@ -294,6 +465,11 @@ func main() {
 			})
 		}
 		store.mu.Unlock()
+
+		// store in sqlite (best-effort; errors are logged but don't fail the request)
+		if err := saveDocumentSQLite(db, docID, req.Content, chunks, vectors); err != nil {
+			log.Printf("failed to persist to sqlite: %v", err)
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&ingestResponse{DocumentID: docID})

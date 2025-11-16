@@ -63,6 +63,18 @@
     - `nextDoc`: 次に採番する文書ID
     - 内部ロックとして `sync.RWMutex` を使用し、並行アクセスを保護。
 
+- **永続化レイヤ（SQLite, オプション）**
+  - SQLite ドライバ: `github.com/mattn/go-sqlite3`
+  - デフォルトではカレントディレクトリの `rag.db` を使用（環境変数 `RAG_SQLITE_PATH` でパス変更可）。
+  - テーブル構成:
+    - `documents(id INTEGER PRIMARY KEY, content TEXT NOT NULL)`
+    - `chunks(id INTEGER PRIMARY KEY, doc_id INTEGER, text TEXT, embedding BLOB, ...)`
+  - 起動時:
+    - `loadFromSQLite()` で `documents` / `chunks` を全件読み込み、`ragStore`（メモリ）に展開。
+  - インジェスト時:
+    - これまで通りメモリ上の `ragStore` に登録。
+    - 追加で `saveDocumentSQLite()` を通じて SQLite にも書き込み（ベクトルは `BLOB` にエンコードして保存）。
+
 - **類似度計算**
   - `cosineSimilarity(a, b []float32) float32`
     - 2 つのベクトル間のコサイン類似度を計算。
@@ -105,6 +117,8 @@ go mod tidy
 
 ```bash
 export OPENAI_API_KEY='your_openai_api_key'
+# SQLite の保存先を変えたい場合（任意）
+export RAG_SQLITE_PATH='./rag.db'
 ```
 
 3. **サーバーの起動**

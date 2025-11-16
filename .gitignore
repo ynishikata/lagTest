@@ -24,4 +24,9 @@ dist/
 ### Env / secrets (set OPENAI_API_KEY via env, not file)
 .env
 
+### SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
 
