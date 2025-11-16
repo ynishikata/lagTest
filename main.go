@@ -58,7 +58,7 @@ type AgentConfig struct {
 // MeetingAgent is an interface for agents participating in the discussion.
 type MeetingAgent interface {
 	Name() string
-	Speak(ctx context.Context, apiKey string, topic string, logs []Message) (string, error)
+	Speak(ctx context.Context, apiKey string, topic string, ragContext string, logs []Message) (string, error)
 }
 
 // gptAgent is a simple implementation backed by OpenAI Chat API.
@@ -68,7 +68,7 @@ type gptAgent struct {
 
 func (a *gptAgent) Name() string { return a.cfg.Name }
 
-func (a *gptAgent) Speak(ctx context.Context, apiKey string, topic string, logs []Message) (string, error) {
+func (a *gptAgent) Speak(ctx context.Context, apiKey string, topic string, ragContext string, logs []Message) (string, error) {
 	var buf strings.Builder
 	for _, m := range logs {
 		fmt.Fprintf(&buf, "Round %d [%s]: %s\n", m.Round, m.Speaker, m.Content)
@@ -97,8 +97,9 @@ func (a *gptAgent) Speak(ctx context.Context, apiKey string, topic string, logs 
 	)
 
 	userContent := fmt.Sprintf(
-		"会議トピック:\n%s\n\nこれまでの議論ログ:\n%s\n\n上記を踏まえて、あなたの次の発言だけをフォーマットに従って返してください。",
+		"会議トピック:\n%s\n\n参考コンテキスト（RAG）:\n%s\n\nこれまでの議論ログ:\n%s\n\n上記を踏まえて、あなたの次の発言だけをフォーマットに従って返してください。",
 		topic,
+		ragContext,
 		historyText,
 	)
 
@@ -107,9 +108,12 @@ func (a *gptAgent) Speak(ctx context.Context, apiKey string, topic string, logs 
 
 // MeetingManager orchestrates a multi-agent discussion.
 type MeetingManager struct {
-	Agents    []MeetingAgent
-	MaxRounds int
-	MaxSilent int
+	Agents      []MeetingAgent
+	MaxRounds   int
+	MaxSilent   int
+	RAGTopK     int
+	RAGEnabled  bool
+	VectorStore *ragStore
 }
 
 // MeetingResult holds the final logs and summary.
@@ -125,6 +129,18 @@ func (m *MeetingManager) RunMeeting(ctx context.Context, apiKey string, topic st
 	round := 1
 	silentRounds := 0
 
+	// optional RAG context based on topic
+	ragContext := ""
+	if m.RAGEnabled && m.VectorStore != nil {
+		ctxText, err := buildRAGContext(ctx, apiKey, m.VectorStore, topic, m.RAGTopK)
+		if err != nil {
+			// best-effort: log but continue without RAG
+			log.Printf("meeting RAG context error: %v", err)
+		} else {
+			ragContext = ctxText
+		}
+	}
+
 	// initial user topic log
 	logs = append(logs, Message{
 		Round:   0,
@@ -136,7 +152,7 @@ func (m *MeetingManager) RunMeeting(ctx context.Context, apiKey string, topic st
 		roundHasNewInfo := false
 
 		for _, agent := range m.Agents {
-			content, err := agent.Speak(ctx, apiKey, topic, logs)
+			content, err := agent.Speak(ctx, apiKey, topic, ragContext, logs)
 			if err != nil {
 				return nil, err
 			}
@@ -198,7 +214,7 @@ func generateSummary(ctx context.Context, apiKey, topic string, logs []Message) 
 }
 
 // newDefaultMeetingManager constructs a manager with predefined agents.
-func newDefaultMeetingManager() *MeetingManager {
+func newDefaultMeetingManager(store *ragStore) *MeetingManager {
 	agents := []MeetingAgent{
 		&gptAgent{cfg: AgentConfig{
 			Name:        "慎重派AI",
@@ -219,9 +235,12 @@ func newDefaultMeetingManager() *MeetingManager {
 	}
 
 	return &MeetingManager{
-		Agents:    agents,
-		MaxRounds: 5,
-		MaxSilent: 2,
+		Agents:      agents,
+		MaxRounds:   5,
+		MaxSilent:   2,
+		RAGTopK:     3,
+		RAGEnabled:  true,
+		VectorStore: store,
 	}
 }
 
@@ -454,6 +473,15 @@ type meetingResponse struct {
 	Summary string    `json:"summary"`
 }
 
+// meetingStreamEvent is sent over Server-Sent Events for streaming meetings.
+type meetingStreamEvent struct {
+	Type    string    `json:"type"`
+	Log     *Message  `json:"log,omitempty"`
+	Topic   string    `json:"topic,omitempty"`
+	Summary string    `json:"summary,omitempty"`
+	Logs    []Message `json:"logs,omitempty"`
+}
+
 // OpenAI HTTP client helpers
 const (
 	embeddingModel = "text-embedding-3-small"
@@ -567,8 +595,62 @@ func chatCompletion(ctx context.Context, apiKey, systemPrompt, userContent strin
 	return parsed.Choices[0].Message.Content, nil
 }
 
+// buildRAGContext builds a textual context for a topic using the existing vector store.
+func buildRAGContext(ctx context.Context, apiKey string, store *ragStore, topic string, topK int) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	if topK <= 0 {
+		topK = 3
+	}
+
+	// embed topic
+	queryVec, err := createEmbedding(ctx, apiKey, topic)
+	if err != nil {
+		return "", err
+	}
+	normalize(queryVec)
+
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if len(store.chunks) == 0 {
+		return "", nil
+	}
+
+	type scored struct {
+		ch storedChunk
+		s  float32
+	}
+	scoredChunks := make([]scored, 0, len(store.chunks))
+	for _, ch := range store.chunks {
+		score := cosineSimilarity(queryVec, ch.Vector)
+		scoredChunks = append(scoredChunks, scored{
+			ch: ch,
+			s:  score,
+		})
+	}
+
+	sort.Slice(scoredChunks, func(i, j int) bool {
+		return scoredChunks[i].s > scoredChunks[j].s
+	})
+
+	if topK > len(scoredChunks) {
+		topK = len(scoredChunks)
+	}
+
+	var fullContext strings.Builder
+	for i := 0; i < topK; i++ {
+		fullContext.WriteString("【RAG Chunk ")
+		fullContext.WriteString(strconv.Itoa(i + 1))
+		fullContext.WriteString("】\n")
+		fullContext.WriteString(scoredChunks[i].ch.Text)
+		fullContext.WriteString("\n\n")
+	}
+	return fullContext.String(), nil
+}
+
 // handleMeeting handles virtual multi-agent meeting requests.
-func handleMeeting(apiKey string) http.HandlerFunc {
+func handleMeeting(apiKey string, store *ragStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -586,7 +668,7 @@ func handleMeeting(apiKey string) http.HandlerFunc {
 		}
 
 		ctx := context.Background()
-		manager := newDefaultMeetingManager()
+		manager := newDefaultMeetingManager(store)
 		if req.MaxRounds > 0 {
 			manager.MaxRounds = req.MaxRounds
 		}
@@ -606,6 +688,158 @@ func handleMeeting(apiKey string) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&resp)
 	}
+}
+
+// handleMeetingStream streams virtual meetings over Server-Sent Events.
+func handleMeetingStream(apiKey string, store *ragStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		query := r.URL.Query()
+		topic := strings.TrimSpace(query.Get("topic"))
+		if topic == "" {
+			http.Error(w, "topic is required", http.StatusBadRequest)
+			return
+		}
+		maxRoundsStr := strings.TrimSpace(query.Get("max_rounds"))
+		maxRounds := 5
+		if maxRoundsStr != "" {
+			if v, err := strconv.Atoi(maxRoundsStr); err == nil && v > 0 {
+				maxRounds = v
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+
+		ctx := r.Context()
+		manager := newDefaultMeetingManager(store)
+		manager.MaxRounds = maxRounds
+
+		// build RAG context once
+		ragContext := ""
+		if manager.RAGEnabled && manager.VectorStore != nil {
+			if ctxText, err := buildRAGContext(ctx, apiKey, manager.VectorStore, topic, manager.RAGTopK); err != nil {
+				log.Printf("meeting stream RAG context error: %v", err)
+			} else {
+				ragContext = ctxText
+			}
+		}
+
+		var logs []Message
+		round := 1
+		silentRounds := 0
+
+		// initial user topic log
+		logs = append(logs, Message{
+			Round:   0,
+			Speaker: "User",
+			Content: topic,
+		})
+
+		// send initial log
+		initialEvent := meetingStreamEvent{
+			Type: "log",
+			Log:  &logs[0],
+		}
+		if err := writeSSE(w, "log", initialEvent); err != nil {
+			return
+		}
+		flusher.Flush()
+
+		for round <= manager.MaxRounds {
+			if ctx.Err() != nil {
+				return
+			}
+
+			roundHasNewInfo := false
+
+			for _, agent := range manager.Agents {
+				content, err := agent.Speak(ctx, apiKey, topic, ragContext, logs)
+				if err != nil {
+					log.Printf("meeting stream agent error: %v", err)
+					return
+				}
+				if strings.TrimSpace(content) == "" {
+					continue
+				}
+
+				msg := Message{
+					Round:   round,
+					Speaker: agent.Name(),
+					Content: content,
+				}
+				logs = append(logs, msg)
+				roundHasNewInfo = true
+
+				ev := meetingStreamEvent{
+					Type: "log",
+					Log:  &msg,
+				}
+				if err := writeSSE(w, "log", ev); err != nil {
+					return
+				}
+				flusher.Flush()
+
+				if ctx.Err() != nil {
+					return
+				}
+			}
+
+			if roundHasNewInfo {
+				silentRounds = 0
+			} else {
+				silentRounds++
+				if silentRounds >= manager.MaxSilent {
+					break
+				}
+			}
+
+			round++
+		}
+
+		summary, err := generateSummary(ctx, apiKey, topic, logs)
+		if err != nil {
+			log.Printf("meeting stream summary error: %v", err)
+			return
+		}
+
+		finalEv := meetingStreamEvent{
+			Type:    "summary",
+			Topic:   topic,
+			Summary: summary,
+			Logs:    logs,
+		}
+		_ = writeSSE(w, "summary", finalEv)
+		flusher.Flush()
+	}
+}
+
+// writeSSE writes a single Server-Sent Event with the given type and payload.
+func writeSSE(w http.ResponseWriter, eventType string, payload interface{}) error {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if eventType != "" {
+		if _, err := fmt.Fprintf(w, "event: %s\n", eventType); err != nil {
+			return err
+		}
+	}
+	if _, err := fmt.Fprintf(w, "data: %s\n\n", string(data)); err != nil {
+		return err
+	}
+	return nil
 }
 
 func main() {
@@ -638,7 +872,8 @@ func main() {
 	mux.Handle("/", http.FileServer(http.Dir("static")))
 
 	// Multi-agent virtual meeting API
-	mux.HandleFunc("/meeting", handleMeeting(apiKey))
+	mux.HandleFunc("/meeting", handleMeeting(apiKey, store))
+	mux.HandleFunc("/meeting/stream", handleMeetingStream(apiKey, store))
 
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

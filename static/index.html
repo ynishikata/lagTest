@@ -414,6 +414,9 @@
             <span class="btn-icon">🧠</span>
             <span>仮想会議を開始</span>
           </button>
+          <button id="meetingStreamBtn" class="btn secondary">
+            ストリーミングで実行
+          </button>
           <button id="clearMeetingBtn" class="btn secondary">
             結果をクリア
           </button>
@@ -455,9 +458,12 @@
     const meetingRounds = document.getElementById("meetingRounds");
     const meetingStatus = document.getElementById("meetingStatus");
     const meetingBtn = document.getElementById("meetingBtn");
+    const meetingStreamBtn = document.getElementById("meetingStreamBtn");
     const clearMeetingBtn = document.getElementById("clearMeetingBtn");
     const meetingSummary = document.getElementById("meetingSummary");
     const meetingLogs = document.getElementById("meetingLogs");
+
+    let meetingEventSource = null;
 
     function setIngestStatus(msg, isError = false) {
       ingestStatus.textContent = msg || "";
@@ -619,6 +625,73 @@
       meetingSummary.textContent = "";
       meetingLogs.innerHTML = "";
       setMeetingStatus("");
+    });
+
+    meetingStreamBtn.addEventListener("click", () => {
+      const topic = meetingTopic.value.trim();
+      if (!topic) {
+        setMeetingStatus("会議トピックを入力してください。", true);
+        return;
+      }
+
+      let rounds = parseInt(meetingRounds.value || "5", 10);
+      if (isNaN(rounds) || rounds < 1) rounds = 5;
+
+      if (meetingEventSource) {
+        meetingEventSource.close();
+        meetingEventSource = null;
+      }
+
+      meetingSummary.textContent = "";
+      meetingLogs.innerHTML = "";
+      setMeetingStatus("会議進行中（ストリーミング）... 複数エージェントで議論しています。");
+
+      const params = new URLSearchParams();
+      params.set("topic", topic);
+      params.set("max_rounds", String(rounds));
+
+      const es = new EventSource(`/meeting/stream?${params.toString()}`);
+      meetingEventSource = es;
+
+      es.addEventListener("log", (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (!data.log) return;
+          const log = data.log;
+          const div = document.createElement("div");
+          div.className = "log-item";
+          const roundLabel = typeof log.round === "number" ? `Round ${log.round}` : "";
+          const header = `[${roundLabel} ${log.speaker || "Unknown"}]`.trim();
+          const content = log.content || "";
+          div.textContent = `${header}\n${content}`;
+          meetingLogs.appendChild(div);
+          meetingLogs.scrollTop = meetingLogs.scrollHeight;
+        } catch (e) {
+          console.error("failed to parse log event", e);
+        }
+      });
+
+      es.addEventListener("summary", (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.summary) {
+            meetingSummary.textContent = data.summary;
+          }
+          setMeetingStatus("会議が完了しました。（ストリーミング）");
+        } catch (e) {
+          console.error("failed to parse summary event", e);
+        } finally {
+          es.close();
+          meetingEventSource = null;
+        }
+      });
+
+      es.onerror = (err) => {
+        console.error("meeting stream error", err);
+        setMeetingStatus("ストリーミングに失敗しました。ページをリロードして再試行してください。", true);
+        es.close();
+        meetingEventSource = null;
+      };
     });
   </script>
 </body>
