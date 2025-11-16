@@ -1,0 +1,27 @@
+### Go build artifacts
+bin/
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+### Go modules / tools cache
+*.test
+*.out
+
+### IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+### OS
+.DS_Store
+
+### Env / secrets (set OPENAI_API_KEY via env, not file)
+.env
+
+
