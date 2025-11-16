@@ -42,21 +42,16 @@ func newRagStore() *ragStore {
 	}
 }
 
-// cosine similarity
+// cosine similarity (assuming both vectors are L2-normalized)
 func cosineSimilarity(a, b []float32) float32 {
 	if len(a) != len(b) || len(a) == 0 {
 		return 0
 	}
-	var dot, na, nb float32
+	var dot float32
 	for i := range a {
 		dot += a[i] * b[i]
-		na += a[i] * a[i]
-		nb += b[i] * b[i]
 	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / (sqrt(na) * sqrt(nb))
+	return dot
 }
 
 func sqrt(x float32) float32 {
@@ -69,6 +64,21 @@ func sqrt(x float32) float32 {
 		z -= (z*z - x) / (2 * z)
 	}
 	return z
+}
+
+// normalize vector in-place to unit length (L2)
+func normalize(v []float32) {
+	var norm float32
+	for _, x := range v {
+		norm += x * x
+	}
+	if norm == 0 {
+		return
+	}
+	norm = sqrt(norm)
+	for i, x := range v {
+		v[i] = x / norm
+	}
 }
 
 // API request/response types
@@ -262,6 +272,7 @@ func main() {
 				http.Error(w, "embedding error", http.StatusInternalServerError)
 				return
 			}
+			normalize(vec)
 			vectors = append(vectors, vec)
 		}
 
@@ -317,6 +328,7 @@ func main() {
 			http.Error(w, "embedding error", http.StatusInternalServerError)
 			return
 		}
+		normalize(queryVec)
 
 		// rank chunks
 		store.mu.RLock()
