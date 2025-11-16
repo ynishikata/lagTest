@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>lagTest RAG Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --bg-alt: #020617;
+      --card-bg: #111827;
+      --border: #1f2937;
+      --accent: #38bdf8;
+      --accent-soft: rgba(56, 189, 248, 0.15);
+      --text: #e5e7eb;
+      --muted: #9ca3af;
+      --danger: #f97373;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      background: radial-gradient(circle at top, #1f2937 0, #020617 55%, #000 100%);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: stretch;
+      justify-content: center;
+    }
+    .app {
+      max-width: 1120px;
+      width: 100%;
+      padding: 24px 16px 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0.03em;
+    }
+    header p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .badge {
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      padding: 4px 10px;
+      font-size: 11px;
+      color: var(--muted);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(15, 23, 42, 0.7);
+      backdrop-filter: blur(8px);
+    }
+    .badge-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #22c55e;
+      box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.25);
+    }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr);
+      gap: 16px;
+    }
+    @media (max-width: 860px) {
+      main {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+    .card {
+      background: linear-gradient(135deg, rgba(15,23,42,0.96), rgba(17,24,39,0.98));
+      border-radius: 16px;
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      box-shadow: 0 18px 45px rgba(15, 23, 42, 0.8);
+      padding: 16px 16px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at top left, rgba(56,189,248,0.12), transparent 60%);
+      pointer-events: none;
+      mix-blend-mode: screen;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      position: relative;
+      z-index: 1;
+    }
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .card-subtitle {
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 3px;
+    }
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      display: block;
+    }
+    textarea, input[type="number"], input[type="text"] {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid rgba(75, 85, 99, 0.9);
+      background: rgba(15,23,42,0.9);
+      color: var(--text);
+      padding: 8px 10px;
+      font-size: 13px;
+      resize: vertical;
+      min-height: 72px;
+      outline: none;
+      transition: border 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    }
+    textarea:focus, input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(56,189,248,0.4);
+      background: rgba(15,23,42,0.98);
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .row > * {
+      flex: 1;
+    }
+    .row-narrow {
+      max-width: 110px;
+    }
+    .btn {
+      border-radius: 999px;
+      border: 0;
+      padding: 7px 14px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: radial-gradient(circle at top left, #38bdf8, #0ea5e9);
+      color: #0b1120;
+      box-shadow: 0 10px 30px rgba(56,189,248,0.5);
+      transition: transform 0.12s ease, box-shadow 0.12s ease, filter 0.12s ease;
+      white-space: nowrap;
+    }
+    .btn.secondary {
+      background: rgba(15,23,42,0.8);
+      color: var(--muted);
+      border: 1px solid rgba(148, 163, 184, 0.4);
+      box-shadow: none;
+    }
+    .btn:disabled {
+      opacity: 0.65;
+      cursor: default;
+      box-shadow: none;
+    }
+    .btn:not(:disabled):hover {
+      transform: translateY(-1px);
+      filter: brightness(1.03);
+      box-shadow: 0 14px 35px rgba(56,189,248,0.6);
+    }
+    .btn.secondary:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 25px rgba(15,23,42,0.9);
+    }
+    .btn-icon {
+      font-size: 15px;
+    }
+    .status {
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 16px;
+    }
+    .status.error {
+      color: var(--danger);
+    }
+    .pill {
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid rgba(148, 163, 184, 0.6);
+      color: var(--muted);
+    }
+    .pill-strong {
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-color: rgba(56,189,248,0.5);
+    }
+    .answer-box {
+      min-height: 100px;
+      border-radius: 10px;
+      border: 1px dashed rgba(75,85,99,0.8);
+      padding: 10px 11px;
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text);
+      background: radial-gradient(circle at top left, rgba(8,47,73,0.8), rgba(15,23,42,0.95));
+      white-space: pre-wrap;
+    }
+    .sources {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      max-height: 130px;
+      overflow: auto;
+      border-radius: 8px;
+      border: 1px solid rgba(55,65,81,0.9);
+      padding: 6px 8px;
+      background: rgba(15,23,42,0.95);
+    }
+    .source-item {
+      margin-bottom: 6px;
+      padding-bottom: 5px;
+      border-bottom: 1px dashed rgba(55,65,81,0.7);
+      white-space: pre-wrap;
+    }
+    .source-item:last-child {
+      border-bottom: none;
+      margin-bottom: 2px;
+      padding-bottom: 0;
+    }
+    footer {
+      margin-top: 8px;
+      font-size: 11px;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: center;
+    }
+    footer a {
+      color: var(--accent);
+      text-decoration: none;
+      opacity: 0.9;
+    }
+    footer a:hover {
+      text-decoration: underline;
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>lagTest RAG Demo</h1>
+        <p>任意のテキストを読み込ませて、その内容に基づいて質問できる簡易RAG UIです。</p>
+      </div>
+      <div class="badge">
+        <span class="badge-dot"></span>
+        <span>Local · http://localhost:8080</span>
+      </div>
+    </header>
+
+    <main>
+      <!-- Document ingest -->
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">1. 文書を読み込む</div>
+            <div class="card-subtitle">長めのマニュアル・仕様書・ブログ記事などをここに貼り付けてください。</div>
+          </div>
+          <span class="pill">/documents</span>
+        </div>
+
+        <div>
+          <label for="docText">文書本文</label>
+          <textarea id="docText" placeholder="例: このシステムは◯◯を目的として設計されており、主要なコンポーネントは..."></textarea>
+        </div>
+
+        <div class="row" style="margin-top: 4px;">
+          <button id="ingestBtn" class="btn">
+            <span class="btn-icon">⬆️</span>
+            <span>文書を登録する</span>
+          </button>
+          <button id="clearDocBtn" class="btn secondary">
+            クリア
+          </button>
+        </div>
+        <div id="ingestStatus" class="status"></div>
+      </section>
+
+      <!-- Query -->
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">2. 質問する</div>
+            <div class="card-subtitle">登録済みの文書の内容だけを根拠に、OpenAIに回答させます。</div>
+          </div>
+          <span class="pill pill-strong">/query</span>
+        </div>
+
+        <div>
+          <label for="question">質問</label>
+          <textarea id="question" placeholder="例: このシステムの全体構成と主要な処理フローを教えてください。"></textarea>
+        </div>
+
+        <div class="row">
+          <div class="row row-narrow">
+            <div>
+              <label for="topK">top_k</label>
+              <input id="topK" type="number" min="1" max="10" value="3" />
+            </div>
+          </div>
+          <div>
+            <label for="systemPrompt">system prompt（任意）</label>
+            <input id="systemPrompt" type="text" placeholder="未指定ならデフォルトの制約プロンプトを使用します。" />
+          </div>
+        </div>
+
+        <div class="row" style="margin-top: 4px;">
+          <button id="askBtn" class="btn">
+            <span class="btn-icon">💬</span>
+            <span>質問する</span>
+          </button>
+          <button id="clearAnswerBtn" class="btn secondary">
+            結果をクリア
+          </button>
+        </div>
+        <div id="queryStatus" class="status"></div>
+
+        <div>
+          <label>回答</label>
+          <div id="answerBox" class="answer-box"></div>
+        </div>
+        <div>
+          <label>使用されたコンテキスト（sources）</label>
+          <div id="sourcesBox" class="sources"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>※ データはプロセス内メモリのみで管理され、サーバー再起動でリセットされます。</span>
+      <span>Powered by OpenAI RAG prototype</span>
+    </footer>
+  </div>
+
+  <script>
+    const ingestBtn = document.getElementById("ingestBtn");
+    const clearDocBtn = document.getElementById("clearDocBtn");
+    const docText = document.getElementById("docText");
+    const ingestStatus = document.getElementById("ingestStatus");
+
+    const askBtn = document.getElementById("askBtn");
+    const clearAnswerBtn = document.getElementById("clearAnswerBtn");
+    const question = document.getElementById("question");
+    const topK = document.getElementById("topK");
+    const systemPrompt = document.getElementById("systemPrompt");
+    const queryStatus = document.getElementById("queryStatus");
+    const answerBox = document.getElementById("answerBox");
+    const sourcesBox = document.getElementById("sourcesBox");
+
+    function setIngestStatus(msg, isError = false) {
+      ingestStatus.textContent = msg || "";
+      ingestStatus.classList.toggle("error", !!isError);
+    }
+    function setQueryStatus(msg, isError = false) {
+      queryStatus.textContent = msg || "";
+      queryStatus.classList.toggle("error", !!isError);
+    }
+
+    ingestBtn.addEventListener("click", async () => {
+      const content = docText.value.trim();
+      if (!content) {
+        setIngestStatus("文書本文を入力してください。", true);
+        return;
+      }
+      ingestBtn.disabled = true;
+      setIngestStatus("登録中... しばらくお待ちください。");
+      try {
+        const res = await fetch("/documents", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+        const data = await res.json();
+        setIngestStatus(`登録完了: document_id = ${data.document_id}`);
+      } catch (err) {
+        console.error(err);
+        setIngestStatus("登録に失敗しました: " + (err.message || err), true);
+      } finally {
+        ingestBtn.disabled = false;
+      }
+    });
+
+    clearDocBtn.addEventListener("click", () => {
+      docText.value = "";
+      setIngestStatus("");
+    });
+
+    askBtn.addEventListener("click", async () => {
+      const q = question.value.trim();
+      if (!q) {
+        setQueryStatus("質問を入力してください。", true);
+        return;
+      }
+      let k = parseInt(topK.value || "3", 10);
+      if (isNaN(k) || k < 1) k = 3;
+
+      const payload = { query: q, top_k: k };
+      const sp = systemPrompt.value.trim();
+      if (sp) payload.system_prompt = sp;
+
+      askBtn.disabled = true;
+      setQueryStatus("回答生成中... OpenAIに問い合わせています。");
+      answerBox.textContent = "";
+      sourcesBox.innerHTML = "";
+
+      try {
+        const res = await fetch("/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+        const data = await res.json();
+        answerBox.textContent = data.answer || "(回答が空でした)";
+
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          sourcesBox.innerHTML = "";
+          data.sources.forEach((s, idx) => {
+            const div = document.createElement("div");
+            div.className = "source-item";
+            div.textContent = `#${idx + 1}\n` + s;
+            sourcesBox.appendChild(div);
+          });
+        } else {
+          sourcesBox.textContent = "(使用されたコンテキストは返されませんでした)";
+        }
+        setQueryStatus("回答取得完了。");
+      } catch (err) {
+        console.error(err);
+        setQueryStatus("クエリに失敗しました: " + (err.message || err), true);
+      } finally {
+        askBtn.disabled = false;
+      }
+    });
+
+    clearAnswerBtn.addEventListener("click", () => {
+      answerBox.textContent = "";
+      sourcesBox.innerHTML = "";
+      setQueryStatus("");
+    });
+  </script>
+</body>
+</html>
+
+

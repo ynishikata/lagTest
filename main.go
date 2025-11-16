@@ -214,6 +214,9 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Simple web UI
+	mux.Handle("/", http.FileServer(http.Dir("static")))
+
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
