@@ -109,6 +109,11 @@
       position: relative;
       z-index: 1;
     }
+    .card-header-line {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
     .card-title {
       font-size: 15px;
       font-weight: 600;
@@ -245,6 +250,28 @@
       margin-bottom: 2px;
       padding-bottom: 0;
     }
+    .logs-box {
+      margin-top: 6px;
+      font-size: 11px;
+      color: var(--muted);
+      max-height: 180px;
+      overflow: auto;
+      border-radius: 8px;
+      border: 1px solid rgba(55,65,81,0.9);
+      padding: 6px 8px;
+      background: rgba(15,23,42,0.95);
+      white-space: pre-wrap;
+    }
+    .log-item {
+      margin-bottom: 6px;
+      padding-bottom: 5px;
+      border-bottom: 1px dashed rgba(55,65,81,0.7);
+    }
+    .log-item:last-child {
+      border-bottom: none;
+      margin-bottom: 2px;
+      padding-bottom: 0;
+    }
     footer {
       margin-top: 8px;
       font-size: 11px;
@@ -309,7 +336,7 @@
       <!-- Query -->
       <section class="card">
         <div class="card-header">
-          <div>
+          <div class="card-header-line">
             <div class="card-title">2. 質問する</div>
             <div class="card-subtitle">登録済みの文書の内容だけを根拠に、OpenAIに回答させます。</div>
           </div>
@@ -356,6 +383,53 @@
       </section>
     </main>
 
+    <main style="margin-top: 8px;">
+      <!-- Virtual meeting -->
+      <section class="card">
+        <div class="card-header">
+          <div class="card-header-line">
+            <div class="card-title">3. 仮想会議（マルチエージェント）</div>
+            <div class="card-subtitle">慎重派・攻め派・コンプラ・現場の4エージェントでトピックについて自動議論し、結論をまとめます。</div>
+          </div>
+          <span class="pill pill-strong">/meeting</span>
+        </div>
+
+        <div>
+          <label for="meetingTopic">会議トピック</label>
+          <textarea id="meetingTopic" placeholder="例: 社内に新しいAIチャットボットを導入する際の進め方について議論してください。"></textarea>
+        </div>
+
+        <div class="row">
+          <div class="row row-narrow">
+            <div>
+              <label for="meetingRounds">ラウンド数</label>
+              <input id="meetingRounds" type="number" min="1" max="10" value="5" />
+            </div>
+          </div>
+          <div class="status" id="meetingStatus"></div>
+        </div>
+
+        <div class="row" style="margin-top: 4px;">
+          <button id="meetingBtn" class="btn">
+            <span class="btn-icon">🧠</span>
+            <span>仮想会議を開始</span>
+          </button>
+          <button id="clearMeetingBtn" class="btn secondary">
+            結果をクリア
+          </button>
+        </div>
+
+        <div style="margin-top: 4px;">
+          <label>会議サマリ</label>
+          <div id="meetingSummary" class="answer-box"></div>
+        </div>
+        <div>
+          <label>会議ログ</label>
+          <div id="meetingLogs" class="logs-box"></div>
+        </div>
+      </section>
+    </main>
+
     <footer>
       <span>※ データはプロセス内メモリのみで管理され、サーバー再起動でリセットされます。</span>
       <span>Powered by OpenAI RAG prototype</span>
@@ -377,6 +451,14 @@
     const answerBox = document.getElementById("answerBox");
     const sourcesBox = document.getElementById("sourcesBox");
 
+    const meetingTopic = document.getElementById("meetingTopic");
+    const meetingRounds = document.getElementById("meetingRounds");
+    const meetingStatus = document.getElementById("meetingStatus");
+    const meetingBtn = document.getElementById("meetingBtn");
+    const clearMeetingBtn = document.getElementById("clearMeetingBtn");
+    const meetingSummary = document.getElementById("meetingSummary");
+    const meetingLogs = document.getElementById("meetingLogs");
+
     function setIngestStatus(msg, isError = false) {
       ingestStatus.textContent = msg || "";
       ingestStatus.classList.toggle("error", !!isError);
@@ -384,6 +466,10 @@
     function setQueryStatus(msg, isError = false) {
       queryStatus.textContent = msg || "";
       queryStatus.classList.toggle("error", !!isError);
+    }
+    function setMeetingStatus(msg, isError = false) {
+      meetingStatus.textContent = msg || "";
+      meetingStatus.classList.toggle("error", !!isError);
     }
 
     ingestBtn.addEventListener("click", async () => {
@@ -474,6 +560,65 @@
       answerBox.textContent = "";
       sourcesBox.innerHTML = "";
       setQueryStatus("");
+    });
+
+    meetingBtn.addEventListener("click", async () => {
+      const topic = meetingTopic.value.trim();
+      if (!topic) {
+        setMeetingStatus("会議トピックを入力してください。", true);
+        return;
+      }
+
+      let rounds = parseInt(meetingRounds.value || "5", 10);
+      if (isNaN(rounds) || rounds < 1) rounds = 5;
+
+      const payload = { topic, max_rounds: rounds };
+
+      meetingBtn.disabled = true;
+      setMeetingStatus("会議進行中... 複数エージェントで議論しています。");
+      meetingSummary.textContent = "";
+      meetingLogs.innerHTML = "";
+
+      try {
+        const res = await fetch("/meeting", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`HTTP ${res.status}: ${text}`);
+        }
+        const data = await res.json();
+        meetingSummary.textContent = data.summary || "(サマリが空でした)";
+
+        if (Array.isArray(data.logs) && data.logs.length > 0) {
+          meetingLogs.innerHTML = "";
+          data.logs.forEach((log) => {
+            const div = document.createElement("div");
+            div.className = "log-item";
+            const roundLabel = typeof log.round === "number" ? `Round ${log.round}` : "";
+            const header = `[${roundLabel} ${log.speaker || "Unknown"}]`.trim();
+            const content = log.content || "";
+            div.textContent = `${header}\n${content}`;
+            meetingLogs.appendChild(div);
+          });
+        } else {
+          meetingLogs.textContent = "(ログは返されませんでした)";
+        }
+        setMeetingStatus("会議が完了しました。");
+      } catch (err) {
+        console.error(err);
+        setMeetingStatus("会議の実行に失敗しました: " + (err.message || err), true);
+      } finally {
+        meetingBtn.disabled = false;
+      }
+    });
+
+    clearMeetingBtn.addEventListener("click", () => {
+      meetingSummary.textContent = "";
+      meetingLogs.innerHTML = "";
+      setMeetingStatus("");
     });
   </script>
 </body>

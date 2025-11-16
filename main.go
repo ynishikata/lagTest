@@ -14,6 +14,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -37,6 +38,191 @@ type ragStore struct {
 	chunks  []storedChunk
 	docs    []document
 	nextDoc int
+}
+
+// --- Meeting / multi-agent discussion types ---
+
+// Message represents a single utterance in the virtual meeting.
+type Message struct {
+	Round   int    `json:"round"`
+	Speaker string `json:"speaker"`
+	Content string `json:"content"`
+}
+
+// AgentConfig defines basic profile for an agent.
+type AgentConfig struct {
+	Name        string
+	RoleSummary string
+}
+
+// MeetingAgent is an interface for agents participating in the discussion.
+type MeetingAgent interface {
+	Name() string
+	Speak(ctx context.Context, apiKey string, topic string, logs []Message) (string, error)
+}
+
+// gptAgent is a simple implementation backed by OpenAI Chat API.
+type gptAgent struct {
+	cfg AgentConfig
+}
+
+func (a *gptAgent) Name() string { return a.cfg.Name }
+
+func (a *gptAgent) Speak(ctx context.Context, apiKey string, topic string, logs []Message) (string, error) {
+	var buf strings.Builder
+	for _, m := range logs {
+		fmt.Fprintf(&buf, "Round %d [%s]: %s\n", m.Round, m.Speaker, m.Content)
+	}
+	historyText := buf.String()
+
+	systemPrompt := fmt.Sprintf(
+		`あなたは仮想会議に参加するAIです。
+あなたの名前: %s
+あなたの役割: %s
+
+次のフォーマットで必ず日本語で発言してください:
+
+[理由]
+- 箇条書きで2〜4点
+
+[提案]
+- 1つの具体的な案
+
+[質問]
+- 他の参加者に投げる質問を1つ
+
+同じことを繰り返さず、議論を前に進めてください。`,
+		a.cfg.Name,
+		a.cfg.RoleSummary,
+	)
+
+	userContent := fmt.Sprintf(
+		"会議トピック:\n%s\n\nこれまでの議論ログ:\n%s\n\n上記を踏まえて、あなたの次の発言だけをフォーマットに従って返してください。",
+		topic,
+		historyText,
+	)
+
+	return chatCompletion(ctx, apiKey, systemPrompt, userContent)
+}
+
+// MeetingManager orchestrates a multi-agent discussion.
+type MeetingManager struct {
+	Agents    []MeetingAgent
+	MaxRounds int
+	MaxSilent int
+}
+
+// MeetingResult holds the final logs and summary.
+type MeetingResult struct {
+	Topic   string    `json:"topic"`
+	Logs    []Message `json:"logs"`
+	Summary string    `json:"summary"`
+}
+
+// RunMeeting runs the discussion loop.
+func (m *MeetingManager) RunMeeting(ctx context.Context, apiKey string, topic string) (*MeetingResult, error) {
+	var logs []Message
+	round := 1
+	silentRounds := 0
+
+	// initial user topic log
+	logs = append(logs, Message{
+		Round:   0,
+		Speaker: "User",
+		Content: topic,
+	})
+
+	for round <= m.MaxRounds {
+		roundHasNewInfo := false
+
+		for _, agent := range m.Agents {
+			content, err := agent.Speak(ctx, apiKey, topic, logs)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(content) == "" {
+				continue
+			}
+
+			logs = append(logs, Message{
+				Round:   round,
+				Speaker: agent.Name(),
+				Content: content,
+			})
+			roundHasNewInfo = true
+		}
+
+		if roundHasNewInfo {
+			silentRounds = 0
+		} else {
+			silentRounds++
+			if silentRounds >= m.MaxSilent {
+				break
+			}
+		}
+
+		round++
+	}
+
+	summary, err := generateSummary(ctx, apiKey, topic, logs)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MeetingResult{
+		Topic:   topic,
+		Logs:    logs,
+		Summary: summary,
+	}, nil
+}
+
+// generateSummary creates the final meeting summary.
+func generateSummary(ctx context.Context, apiKey, topic string, logs []Message) (string, error) {
+	var buf strings.Builder
+	for _, m := range logs {
+		fmt.Fprintf(&buf, "Round %d [%s]: %s\n", m.Round, m.Speaker, m.Content)
+	}
+	logText := buf.String()
+
+	systemPrompt := `あなたは会議モデレーターです。
+以下の議論ログを読み、「結論・利点・リスク・推奨案」の4項目で日本語のサマリーを作成してください。
+それぞれ見出しを付けて、箇条書きを中心に端的にまとめてください。`
+
+	userContent := fmt.Sprintf(
+		"会議トピック:\n%s\n\n議論ログ:\n%s",
+		topic,
+		logText,
+	)
+
+	return chatCompletion(ctx, apiKey, systemPrompt, userContent)
+}
+
+// newDefaultMeetingManager constructs a manager with predefined agents.
+func newDefaultMeetingManager() *MeetingManager {
+	agents := []MeetingAgent{
+		&gptAgent{cfg: AgentConfig{
+			Name:        "慎重派AI",
+			RoleSummary: "リスクを重視し、失敗や副作用、長期的な影響に敏感に反応する慎重なアナリスト。",
+		}},
+		&gptAgent{cfg: AgentConfig{
+			Name:        "攻め派AI",
+			RoleSummary: "短期から中期の成果を最大化することを重視し、大胆な提案を行う推進役。",
+		}},
+		&gptAgent{cfg: AgentConfig{
+			Name:        "コンプラAI",
+			RoleSummary: "法令・社内規定・倫理面からの問題を指摘し、ガバナンスを守る役割。",
+		}},
+		&gptAgent{cfg: AgentConfig{
+			Name:        "現場AI",
+			RoleSummary: "現場オペレーションや実務担当者の視点から、実現可能性・負荷を評価する役割。",
+		}},
+	}
+
+	return &MeetingManager{
+		Agents:    agents,
+		MaxRounds: 5,
+		MaxSilent: 2,
+	}
 }
 
 func newRagStore() *ragStore {
@@ -256,6 +442,18 @@ type queryResponse struct {
 	Sources []string `json:"sources"`
 }
 
+// Meeting API request/response types
+type meetingRequest struct {
+	Topic     string `json:"topic"`
+	MaxRounds int    `json:"max_rounds,omitempty"`
+}
+
+type meetingResponse struct {
+	Topic   string    `json:"topic"`
+	Logs    []Message `json:"logs"`
+	Summary string    `json:"summary"`
+}
+
 // OpenAI HTTP client helpers
 const (
 	embeddingModel = "text-embedding-3-small"
@@ -369,6 +567,47 @@ func chatCompletion(ctx context.Context, apiKey, systemPrompt, userContent strin
 	return parsed.Choices[0].Message.Content, nil
 }
 
+// handleMeeting handles virtual multi-agent meeting requests.
+func handleMeeting(apiKey string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req meetingRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Topic) == "" {
+			http.Error(w, "topic is required", http.StatusBadRequest)
+			return
+		}
+
+		ctx := context.Background()
+		manager := newDefaultMeetingManager()
+		if req.MaxRounds > 0 {
+			manager.MaxRounds = req.MaxRounds
+		}
+
+		result, err := manager.RunMeeting(ctx, apiKey, req.Topic)
+		if err != nil {
+			log.Printf("meeting error: %v", err)
+			http.Error(w, "meeting error", http.StatusInternalServerError)
+			return
+		}
+
+		resp := meetingResponse{
+			Topic:   result.Topic,
+			Logs:    result.Logs,
+			Summary: result.Summary,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&resp)
+	}
+}
+
 func main() {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
@@ -397,6 +636,9 @@ func main() {
 
 	// Simple web UI
 	mux.Handle("/", http.FileServer(http.Dir("static")))
+
+	// Multi-agent virtual meeting API
+	mux.HandleFunc("/meeting", handleMeeting(apiKey))
 
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
